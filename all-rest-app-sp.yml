@@ -1,0 +1,156 @@
+---
+- name: Manage Azure AI Cognitive Services
+  hosts: localhost
+  gather_facts: no
+  vars:
+    tenant_id: "{{ tenand_id }}"
+    master_client_id: "{{ master_client_id }}"
+    master_client_secret: "{{ master_client_secret }}"
+    child_app_display_name: "RHDP-lightspeed-{{ GUID }}-5"
+    group_id: "{{ group_id }}"
+    azure_region: "{{ azure_region }}"  # e.g., westus, eastus
+
+  tasks:
+    - name: Get Token for Master App
+      uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/v2.0/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body: "grant_type=client_credentials&client_id={{ master_client_id }}&client_secret={{ master_client_secret }}&scope=https://graph.microsoft.com/.default"
+        return_content: yes
+        status_code: 200
+      register: master_token_response
+
+    - name: Debug Master Token Response
+      debug:
+        var: master_token_response
+
+    - name: Set Master Access Token
+      set_fact:
+        master_access_token: "{{ master_token_response.json.access_token }}"
+      
+    - name: Debug Master Token Response
+      debug:
+        var: master_access_token
+
+    - name: Create Child App Registration
+      uri:
+        url: "https://graph.microsoft.com/v1.0/applications"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ master_access_token }}"
+          Content-Type: "application/json"
+        body:
+          displayName: "{{ child_app_display_name }}"
+          passwordCredentials:
+            - displayName: "ChildAppRegistrationSecret"
+        body_format: json
+        return_content: yes
+        status_code: 201  # Explicitly expect 201 Created
+      register: child_app_response
+
+    - name: Debug Child App Registration Response
+      debug:
+        var: child_app_response
+
+
+    - name: Set Child App ID and Secret
+      set_fact:
+        child_app_id: "{{ child_app_response.json.appId }}"
+        child_client_secret: "{{ child_app_response.json.passwordCredentials[0].secretText }}"
+
+    - name: Debug Master Token Response
+      debug:
+            msg:
+              - "Child App ID: {{ child_app_id }}"
+              - "Child Client Secret: {{ child_client_secret }}"
+
+    - name: Create Service Principal for Child App
+      uri:
+        url: "https://graph.microsoft.com/v1.0/servicePrincipals"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ master_access_token }}"
+          Content-Type: "application/json"
+        body:
+          appId: "{{ child_app_id | string }}"
+        body_format: json    
+        return_content: yes
+        status_code: 201  # Explicitly expect 201 Created
+      register: service_principal_response
+
+    - name: Debug Service Principal Response
+      debug:
+            msg:
+              - "Service Principal Response: {{ service_principal_response }}"
+
+    - name: Set Child Service Principal Object ID
+      set_fact:
+        child_service_principal_object_id: "{{ service_principal_response.json.id }}"
+
+    - name: Debug Child Service Principal Object ID
+      debug:
+            msg:
+              - "Child Service Principal Object ID: {{ child_service_principal_object_id }}"
+
+    - name: Add Child App to Azure AD Group
+      uri:
+        url: "https://graph.microsoft.com/v1.0/groups/{{ group_id }}/members/$ref"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ master_access_token }}"
+          Content-Type: "application/json"
+        body:
+          "@odata.id": "https://graph.microsoft.com/v1.0/directoryObjects/{{ child_service_principal_object_id }}"
+        body_format: json
+        return_content: yes
+        status_code: [201, 204]  # Explicitly expect 201 Created
+      register: add_to_group_response
+
+    - name: Debug Add Child App to Group Response
+      debug:
+        var: add_to_group_response
+
+    - name: Get Token for Child App using REST API call
+      uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/v2.0/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ child_app_id }}"
+          client_secret: "{{ child_client_secret }}"
+          scope: https://cognitiveservices.azure.com/.default
+      register: child_token_response
+
+    - name: Set Child Access Token
+      set_fact:
+        child_access_token: "{{ child_token_response.json.access_token }}"
+
+    - name: Debug Child Access Token
+      debug:
+        var: child_access_token
+
+    - name: Ask AI Service Using Child App 
+      uri:
+        url: "https://llm-gpt4-lightspeed.openai.azure.com/openai/deployments/gpt-4/chat/completions?api-version=2023-06-01-preview"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer {{ child_access_token }}"
+        body:
+          messages:
+            - role: system
+              content: "You are a helpful assistant."
+            - role: user
+              content: "What is the largest city in Spain?"
+          max_tokens: 100
+        body_format: json    
+      register: ai_service_response
+
+    - name: Display AI Service Response
+      debug:
+        var: ai_service_response.stdout
